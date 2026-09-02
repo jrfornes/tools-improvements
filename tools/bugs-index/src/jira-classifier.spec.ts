@@ -1,4 +1,5 @@
 import {
+  applyJiraClassification,
   chunk,
   classifyIssueKeys,
   DEFAULT_BUG_TYPES,
@@ -7,6 +8,8 @@ import {
   jiraConfigFromEnv,
   type JiraConfig,
 } from './jira-classifier';
+
+const noDelay = () => Promise.resolve();
 
 const config: JiraConfig = {
   site: 'https://example.atlassian.net',
@@ -118,28 +121,138 @@ describe('classifyIssueKeys', () => {
     expect(result.unresolvedKeys).toEqual(['GONE-9']);
   });
 
-  // One failing page must not discard the pages that succeeded.
-  it('keeps successful batches when another batch fails', async () => {
+  // A batch that fails on every attempt must not discard the batches that
+  // succeeded. The mock fails deterministically for one batch's keys (not by
+  // call count), so retries don't accidentally "fix" it.
+  it('keeps successful batches when another batch fails on every attempt', async () => {
     const keys = Array.from({ length: 150 }, (_, i) => `ACME-${i}`);
-    let call = 0;
 
-    const result = await classifyIssueKeys(keys, config, async (batch) => {
-      call++;
-      if (call === 1) throw new Error('429 rate limited');
-      return {
-        issues: batch.map((key) => ({
-          key,
-          fields: { issuetype: { name: 'Bug' } },
-        })),
-      };
-    });
+    const result = await classifyIssueKeys(
+      keys,
+      config,
+      async (batch) => {
+        if (batch.includes('ACME-0')) throw new Error('429 rate limited');
+        return {
+          issues: batch.map((key) => ({
+            key,
+            fields: { issuetype: { name: 'Bug' } },
+          })),
+        };
+      },
+      2,
+      noDelay
+    );
 
     expect(result.types.size).toBe(50);
     expect(result.unresolvedKeys).toHaveLength(100);
+    // Retried, then counted as one failure per batch, not once per attempt.
     expect(result.failures).toEqual(['429 rate limited']);
+  });
+
+  // A blip that clears on retry must not tax the whole index the way a
+  // persistent failure does.
+  it('recovers a batch that fails once and succeeds on retry', async () => {
+    const keys = Array.from({ length: 10 }, (_, i) => `ACME-${i}`);
+    let attempts = 0;
+
+    const result = await classifyIssueKeys(
+      keys,
+      config,
+      async (batch) => {
+        attempts++;
+        if (attempts === 1) throw new Error('ETIMEDOUT');
+        return {
+          issues: batch.map((key) => ({
+            key,
+            fields: { issuetype: { name: 'Bug' } },
+          })),
+        };
+      },
+      2,
+      noDelay
+    );
+
+    expect(attempts).toBe(2);
+    expect(result.types.size).toBe(10);
+    expect(result.unresolvedKeys).toEqual([]);
+    expect(result.failures).toEqual([]);
+  });
+
+  it('gives up after exhausting retries', async () => {
+    const keys = ['ACME-1'];
+    let attempts = 0;
+
+    const result = await classifyIssueKeys(
+      keys,
+      config,
+      async () => {
+        attempts++;
+        throw new Error('down');
+      },
+      2,
+      noDelay
+    );
+
+    expect(attempts).toBe(3); // initial try + 2 retries
+    expect(result.failures).toEqual(['down']);
+    expect(result.unresolvedKeys).toEqual(['ACME-1']);
   });
 
   it('defaults to Bug and Defect as the accepted types', () => {
     expect(DEFAULT_BUG_TYPES).toEqual(['Bug', 'Defect']);
+  });
+});
+
+describe('applyJiraClassification', () => {
+  it('keeps bugs, drops stories as non-bugs, and drops unresolved without counting them as non-bugs when every batch succeeds', () => {
+    const types = new Map([
+      ['ACME-1', 'Bug'],
+      ['ACME-2', 'Story'],
+      ['ACME-3', 'Defect'],
+    ]);
+    const unresolved = ['ACME-4'];
+
+    const result = applyJiraClassification(
+      ['ACME-1', 'ACME-2', 'ACME-3', 'ACME-4'],
+      types,
+      unresolved,
+      [],
+      ['Bug', 'Defect']
+    );
+
+    expect(result.classified).toBe(true);
+    expect(result.keptKeys).toEqual(['ACME-1', 'ACME-3']);
+    expect(result.droppedNonBugs).toBe(1);
+    expect(result.unresolvedDropped).toBe(1);
+  });
+
+  it('leaves the index unclassified and unfiltered when any batch failed', () => {
+    const types = new Map([['ACME-1', 'Bug']]);
+    const keys = ['ACME-1', 'ACME-2', 'ACME-3'];
+
+    const result = applyJiraClassification(
+      keys,
+      types,
+      ['ACME-2', 'ACME-3'],
+      ['Jira /search returned 500'],
+      ['Bug', 'Defect']
+    );
+
+    expect(result.classified).toBe(false);
+    expect(result.keptKeys).toEqual(keys);
+    expect(result.droppedNonBugs).toBe(0);
+    expect(result.unresolvedDropped).toBe(0);
+  });
+
+  it('treats an empty key set with no failures as a successful empty classification', () => {
+    const result = applyJiraClassification([], new Map(), [], [], [
+      'Bug',
+      'Defect',
+    ]);
+
+    expect(result.classified).toBe(true);
+    expect(result.keptKeys).toEqual([]);
+    expect(result.droppedNonBugs).toBe(0);
+    expect(result.unresolvedDropped).toBe(0);
   });
 });

@@ -2,8 +2,14 @@
 
 The **Change Analysis** tool inspects a set of code changes (typically a Pull
 Request) and reports **findings**: concrete, evidence-backed observations a
-reviewer can act on and verify. It runs **100% locally** — no network access, no
-AI/LLM.
+reviewer can act on and verify. Its providers make **no network calls** and use
+no AI/LLM — every signal comes from the local git history, the Nx graph, and
+files on disk.
+
+One caveat: when `--base`/`--head` aren't both passed explicitly, ref
+resolution runs `git ls-remote origin` to check whether the current branch
+exists there, which is a real (best-effort, failure-tolerant) network call.
+Pass `--base` and `--head` yourself to skip it entirely.
 
 It deliberately does **not** produce a risk score. See
 [Why there is no score](#why-there-is-no-score).

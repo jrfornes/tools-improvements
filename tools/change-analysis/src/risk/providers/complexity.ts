@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import simpleGit from 'simple-git';
 import * as ts from 'typescript';
 import type {
   Finding,
@@ -14,13 +15,31 @@ const LABEL = 'Cyclomatic complexity';
 const COMPLEXITY_THRESHOLD = 25;
 const MAX_FINDINGS = 3;
 
-function isTsSourceFile(file: string): boolean {
+export function isTsSourceFile(file: string): boolean {
   return (
     file.endsWith('.ts') &&
     !file.endsWith('.spec.ts') &&
     !file.endsWith('.cy.ts') &&
     !file.endsWith('.d.ts')
   );
+}
+
+/**
+ * Complexity is counted over the whole file, so without a base comparison a
+ * file that is merely large stays "high complexity" forever — a one-line
+ * touch to an old, already-complex file trips this on every PR that ever
+ * touches it, which is exactly how a heuristic teaches reviewers to ignore
+ * it. Flag it when it's genuinely new (no base version) or this diff made it
+ * worse; stay quiet when the diff didn't change the file's complexity.
+ */
+export function shouldFlagComplexity(
+  complexity: number,
+  baseComplexity: number | null,
+  threshold: number = COMPLEXITY_THRESHOLD
+): boolean {
+  if (complexity < threshold) return false;
+  if (baseComplexity === null) return true;
+  return complexity > baseComplexity;
 }
 
 export function calculateCyclomaticComplexity(
@@ -78,7 +97,36 @@ export const complexityProvider: RiskProvider = {
       };
     }
 
-    const byFile: Array<{ file: string; complexity: number }> = [];
+    const git = simpleGit(process.cwd());
+
+    // Shallow clones may not hold the base commit's blobs at all, which would
+    // make every file look "new" (baseComplexity null) and over-fire. Fall
+    // back to plain threshold-only flagging there instead.
+    async function baseComplexityFor(file: string): Promise<number | null> {
+      if (input.shallowRepo) return null;
+      try {
+        const content = await git.show([`${input.base}:${file}`]);
+        const sourceFile = ts.createSourceFile(
+          file,
+          content,
+          ts.ScriptTarget.Latest,
+          true,
+          ts.ScriptKind.TS
+        );
+        return calculateCyclomaticComplexity(sourceFile);
+      } catch {
+        // Doesn't exist at base (new file, or git show failed) — treated as
+        // "no prior complexity to compare against" rather than as 0, so a
+        // brand-new complex file still gets flagged.
+        return null;
+      }
+    }
+
+    const byFile: Array<{
+      file: string;
+      complexity: number;
+      baseComplexity: number | null;
+    }> = [];
     for (const file of targetFiles) {
       const abs = path.join(process.cwd(), file);
       if (!fs.existsSync(abs)) continue;
@@ -89,10 +137,11 @@ export const complexityProvider: RiskProvider = {
         true,
         ts.ScriptKind.TS
       );
-      byFile.push({
-        file,
-        complexity: calculateCyclomaticComplexity(sourceFile),
-      });
+      const complexity = calculateCyclomaticComplexity(sourceFile);
+      const baseComplexity = input.shallowRepo
+        ? null
+        : await baseComplexityFor(file);
+      byFile.push({ file, complexity, baseComplexity });
     }
 
     if (byFile.length === 0) {
@@ -111,16 +160,24 @@ export const complexityProvider: RiskProvider = {
     const worst = sorted[0];
 
     const findings: Finding[] = sorted
-      .filter((item) => item.complexity >= COMPLEXITY_THRESHOLD)
+      .filter((item) =>
+        shouldFlagComplexity(item.complexity, item.baseComplexity)
+      )
       .slice(0, MAX_FINDINGS)
-      .map((item) => ({
-        providerId: ID,
-        kind: 'high-complexity',
-        severity: 'medium' as const,
-        title: `High branching complexity in ${item.file}`,
-        evidence: `Cyclomatic complexity ${item.complexity} (threshold ${COMPLEXITY_THRESHOLD}), counted over the whole file.`,
-        files: [item.file],
-      }));
+      .map((item) => {
+        const change =
+          item.baseComplexity === null
+            ? 'new file'
+            : `up from ${item.baseComplexity} before this change`;
+        return {
+          providerId: ID,
+          kind: 'high-complexity',
+          severity: 'medium' as const,
+          title: `High branching complexity in ${item.file}`,
+          evidence: `Cyclomatic complexity ${item.complexity} (threshold ${COMPLEXITY_THRESHOLD}), counted over the whole file — ${change}.`,
+          files: [item.file],
+        };
+      });
 
     return {
       id: ID,

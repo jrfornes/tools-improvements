@@ -43,8 +43,11 @@ npx nx run bugs-index:build --jira
 ```
 
 Issue types are resolved in batches of 100 via a single JQL search per batch, so
-a year of history costs a handful of requests rather than one per ticket. A
-batch that fails is reported as a warning and leaves the whole index
+a year of history costs a handful of requests rather than one per ticket. Each
+batch is retried up to twice with backoff before it's counted as failed, so a
+single transient blip (a rate limit, a dropped connection) doesn't tax the
+whole index the way a persistently broken batch does. A batch that still fails
+after retries is reported as a warning and leaves the whole index
 unclassified; only a clean run filters down to defects.
 
 ## Arguments
