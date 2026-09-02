@@ -1,0 +1,21 @@
+{
+  "name": "bugs-index",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node --project tools/tsconfig.tools.json tools/bugs-index/src/cli.ts",
+        "cwd": "."
+      }
+    },
+    "test": {
+      "executor": "@nx/jest:jest",
+      "outputs": ["{workspaceRoot}/coverage/tools/bugs-index"],
+      "options": {
+        "jestConfig": "tools/bugs-index/jest.config.ts",
+        "tsConfig": "tools/bugs-index/tsconfig.spec.json"
+      }
+    }
+  }
+}

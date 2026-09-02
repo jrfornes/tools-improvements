@@ -1,0 +1,21 @@
+{
+  "name": "change-analysis",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "targets": {
+    "run": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node --project tools/tsconfig.tools.json tools/change-analysis/src/cli.ts",
+        "cwd": "."
+      }
+    },
+    "test": {
+      "executor": "@nx/jest:jest",
+      "outputs": ["{workspaceRoot}/coverage/tools/change-analysis"],
+      "options": {
+        "jestConfig": "tools/change-analysis/jest.config.ts",
+        "tsConfig": "tools/change-analysis/tsconfig.spec.json"
+      }
+    }
+  }
+}

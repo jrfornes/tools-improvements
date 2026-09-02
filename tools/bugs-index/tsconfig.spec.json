@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.tools.json",
+  "compilerOptions": {
+    "outDir": "../../dist/out-tsc",
+    "moduleResolution": "node",
+    "module": "commonjs",
+    "types": ["jest", "node"]
+  },
+  "include": ["src/**/*.ts", "../shared/**/*.ts"]
+}
