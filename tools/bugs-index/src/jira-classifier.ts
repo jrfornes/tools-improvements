@@ -98,13 +98,46 @@ async function fetchBatch(
   );
 }
 
+/** Retries before a batch is counted as failed — a transient blip must not
+ *  tax the whole index the same way a persistently broken batch does. */
+export const JIRA_BATCH_RETRIES = 2;
+
+function backoffMs(attempt: number): number {
+  return 300 * 2 ** attempt;
+}
+
+async function fetchBatchWithRetry(
+  batch: string[],
+  config: JiraConfig,
+  fetchImpl: (
+    batch: string[],
+    config: JiraConfig
+  ) => Promise<JiraSearchResponse>,
+  retries: number,
+  delay: (ms: number) => Promise<void>
+): Promise<JiraSearchResponse> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fetchImpl(batch, config);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) await delay(backoffMs(attempt));
+    }
+  }
+  throw lastErr;
+}
+
 export async function classifyIssueKeys(
   keys: string[],
   config: JiraConfig,
   fetchImpl: (
     batch: string[],
     config: JiraConfig
-  ) => Promise<JiraSearchResponse> = fetchBatch
+  ) => Promise<JiraSearchResponse> = fetchBatch,
+  retries: number = JIRA_BATCH_RETRIES,
+  delay: (ms: number) => Promise<void> = (ms) =>
+    new Promise((resolve) => setTimeout(resolve, ms))
 ): Promise<ClassifyResult> {
   const types = new Map<string, string>();
   const unresolvedKeys: string[] = [];
@@ -112,7 +145,13 @@ export async function classifyIssueKeys(
 
   for (const batch of chunk(keys, JIRA_BATCH_SIZE)) {
     try {
-      const data = await fetchImpl(batch, config);
+      const data = await fetchBatchWithRetry(
+        batch,
+        config,
+        fetchImpl,
+        retries,
+        delay
+      );
       for (const issue of data.issues ?? []) {
         const key = issue.key?.toUpperCase();
         const typeName = issue.fields?.issuetype?.name;

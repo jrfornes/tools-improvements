@@ -22,29 +22,49 @@ function normalizePath(input: string): string {
   return input.replace(/\\/g, '/');
 }
 
-function isSourceTsFile(file: string): boolean {
+export function isSourceTsFile(file: string): boolean {
   return (
     file.endsWith('.ts') &&
     !file.endsWith('.spec.ts') &&
+    !file.endsWith('.cy.ts') &&
     !file.endsWith('.d.ts')
   );
 }
 
+/**
+ * A stale report from an earlier run (a different branch, a project nobody
+ * touched today) reads as measured-and-fine even though it says nothing
+ * about the current diff. Picking the most recently written report, and
+ * surfacing its age, at least makes the risk visible instead of silent.
+ */
 export function findCoverageReport(rootDir: string): string | null {
   const coverageDir = path.join(rootDir, 'coverage');
   if (!fs.existsSync(coverageDir)) return null;
 
+  let newest: { path: string; mtimeMs: number } | null = null;
   const stack = [coverageDir];
   while (stack.length > 0) {
     const current = stack.pop() as string;
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const abs = path.join(current, entry.name);
-      if (entry.isDirectory()) stack.push(abs);
-      else if (entry.isFile() && entry.name === 'coverage-final.json')
-        return abs;
+      if (entry.isDirectory()) {
+        stack.push(abs);
+      } else if (entry.isFile() && entry.name === 'coverage-final.json') {
+        const mtimeMs = fs.statSync(abs).mtimeMs;
+        if (!newest || mtimeMs > newest.mtimeMs) newest = { path: abs, mtimeMs };
+      }
     }
   }
-  return null;
+  return newest?.path ?? null;
+}
+
+/** e.g. "42m", "3h", "5d" — coarse on purpose, this is a staleness cue, not a clock. */
+export function formatAge(ms: number): string {
+  const minutes = ms / 60_000;
+  if (minutes < 60) return `${Math.max(1, Math.round(minutes))}m`;
+  const hours = minutes / 60;
+  if (hours < 24) return `${Math.round(hours)}h`;
+  return `${Math.round(hours / 24)}d`;
 }
 
 function getCoveragePct(
@@ -100,8 +120,10 @@ export const testCoverageProvider: RiskProvider = {
     // them in this workspace. Say so rather than reporting 0% as if measured.
     const reportPath = findCoverageReport(process.cwd());
     let avgCoveragePct: number | null = null;
+    let reportAgeMs: number | null = null;
 
     if (reportPath) {
+      reportAgeMs = Date.now() - fs.statSync(reportPath).mtimeMs;
       try {
         const parsed = JSON.parse(
           fs.readFileSync(reportPath, 'utf-8')
@@ -117,6 +139,16 @@ export const testCoverageProvider: RiskProvider = {
       }
     }
 
+    // A report older than the run is worth flagging even when the number
+    // looks fine — it may simply predate this diff.
+    const STALE_AGE_MS = 60 * 60_000;
+    const ageNote =
+      reportAgeMs !== null
+        ? ` (report ${formatAge(reportAgeMs)} old${
+            reportAgeMs > STALE_AGE_MS ? ', may be stale — rerun tests' : ''
+          })`
+        : '';
+
     if (avgCoveragePct !== null && avgCoveragePct < COVERAGE_TARGET_PCT) {
       findings.push({
         providerId: ID,
@@ -128,13 +160,13 @@ export const testCoverageProvider: RiskProvider = {
         evidence: `Below the ${COVERAGE_TARGET_PCT}% target, measured from ${path.relative(
           process.cwd(),
           reportPath as string
-        )}.`,
+        )}${ageNote}.`,
       });
     }
 
     const coverageNote =
       avgCoveragePct !== null
-        ? `avg line coverage ${avgCoveragePct.toFixed(1)}%`
+        ? `avg line coverage ${avgCoveragePct.toFixed(1)}%${ageNote}`
         : 'no coverage report in workspace (run tests first)';
 
     return {

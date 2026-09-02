@@ -50,6 +50,13 @@ export interface BugIndex {
   byFile: Record<string, string[]>;
 }
 
+/** Issue keys referenced in a commit subject, uppercased and deduped. */
+export function extractBugKeys(message: string, bugPattern: string): string[] {
+  const matched = message.match(new RegExp(bugPattern, 'g'));
+  if (!matched) return [];
+  return [...new Set(matched.map((m) => m.toUpperCase()))];
+}
+
 export interface BuildBugIndexOptions {
   since?: string;
   bugPattern?: string;
@@ -77,7 +84,6 @@ export async function buildBugIndex(
   } = opts;
 
   const git = simpleGit(repoRoot);
-  const regex = new RegExp(bugPattern, 'g');
 
   const rawLog = await git.raw([
     'log',
@@ -119,10 +125,8 @@ export async function buildBugIndex(
     const message = messageParts.join('|');
     if (!hash || !message) continue;
 
-    const matched = message.match(regex);
-    if (!matched) continue;
-
-    const bugIds = [...new Set(matched.map((m) => m.toUpperCase()))];
+    const bugIds = extractBugKeys(message, bugPattern);
+    if (bugIds.length === 0) continue;
 
     let commitFiles: string[] = [];
     try {

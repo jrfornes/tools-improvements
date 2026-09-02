@@ -25,11 +25,51 @@ interface CouplingCandidate {
   rate: number;
 }
 
-function parseLines(raw: string): string[] {
-  return raw
-    .split('\n')
-    .map((item) => item.trim())
-    .filter(Boolean);
+export interface CommitFiles {
+  hash: string;
+  files: string[];
+}
+
+/**
+ * Precedes each commit hash in the `git log` format string below. A control
+ * character can't appear in a file path, so a commit-hash line can never be
+ * confused with a file-path line.
+ */
+const RECORD_SEP = '';
+
+/**
+ * Parses the output of
+ * `git log -n<N> --format=<RECORD_SEP>%H --name-only --full-diff -- <file>`
+ * into one record per commit.
+ *
+ * `--full-diff` matters: without it, `--name-only` combined with a trailing
+ * pathspec lists only `<file>` itself for every matching commit, instead of
+ * every file that commit actually touched — which is the whole point of a
+ * co-change query. This one call replaces what used to be a `git log` (to
+ * list commit hashes) plus one `git show` per commit, cutting up to ~30
+ * sequential git subprocess spawns per changed file down to 1.
+ *
+ * Note: `git log` (unlike `git show`) prints no diff for a merge commit
+ * unless `-m`/`--first-parent` is passed, so a merge commit in a file's
+ * history contributes an empty file list here rather than the merge's
+ * combined diff.
+ */
+export function parseCommitFileLists(raw: string): CommitFiles[] {
+  const records: CommitFiles[] = [];
+  let current: CommitFiles | null = null;
+
+  for (const rawLine of raw.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line.startsWith(RECORD_SEP)) {
+      current = { hash: line.slice(RECORD_SEP.length), files: [] };
+      records.push(current);
+    } else if (current) {
+      current.files.push(line);
+    }
+  }
+
+  return records;
 }
 
 export const logicalCouplingProvider: RiskProvider = {
@@ -65,41 +105,33 @@ export const logicalCouplingProvider: RiskProvider = {
     const missingCouples: CouplingCandidate[] = [];
 
     for (const sourceFile of filesToAnalyze) {
-      let hashes: string[] = [];
+      let commits: CommitFiles[] = [];
       try {
-        hashes = parseLines(
-          await git.raw([
-            'log',
-            `-n${MAX_COMMITS_PER_FILE}`,
-            '--format=%H',
-            '--',
-            sourceFile,
-          ])
-        );
+        const raw = await git.raw([
+          'log',
+          `-n${MAX_COMMITS_PER_FILE}`,
+          `--format=${RECORD_SEP}%H`,
+          '--name-only',
+          '--full-diff',
+          '--',
+          sourceFile,
+        ]);
+        commits = parseCommitFileLists(raw);
       } catch {
         continue;
       }
-      if (hashes.length === 0) continue;
+      if (commits.length === 0) continue;
 
       const coChangeCount = new Map<string, number>();
-      for (const hash of hashes) {
-        try {
-          const filesInCommit = new Set(
-            parseLines(
-              await git.raw(['show', '--pretty=format:', '--name-only', hash])
-            )
-          );
-          filesInCommit.delete(sourceFile);
-          for (const file of filesInCommit) {
-            coChangeCount.set(file, (coChangeCount.get(file) ?? 0) + 1);
-          }
-        } catch {
-          continue;
+      for (const commit of commits) {
+        for (const file of commit.files) {
+          if (file === sourceFile) continue;
+          coChangeCount.set(file, (coChangeCount.get(file) ?? 0) + 1);
         }
       }
 
       for (const [coupledFile, count] of coChangeCount) {
-        const rate = count / hashes.length;
+        const rate = count / commits.length;
         if (
           count >= MIN_COCHANGE_COUNT &&
           rate >= MIN_COUPLING_RATE &&
@@ -112,7 +144,7 @@ export const logicalCouplingProvider: RiskProvider = {
             sourceFile,
             coupledFile,
             coChangeCount: count,
-            sourceCommitCount: hashes.length,
+            sourceCommitCount: commits.length,
             rate,
           });
         }

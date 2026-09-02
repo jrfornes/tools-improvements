@@ -19,6 +19,23 @@ function isRelevantFile(file: string): boolean {
   return !file.endsWith('.lock') && file !== 'package-lock.json';
 }
 
+/**
+ * Gating on the *best* per-file ownership (the original approach) is
+ * defeated by a single habitually-touched file: an author who owns 90% of
+ * one config file but 0% of the ten substantive files in the diff reads as
+ * "familiar" and never triggers a reviewer suggestion. The median resists
+ * that the way a mean pooled across files can't — one outlier file, in
+ * either direction, doesn't flip the result.
+ */
+export function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
 export const familiarityProvider: RiskProvider = {
   id: ID,
   label: LABEL,
@@ -60,12 +77,13 @@ export const familiarityProvider: RiskProvider = {
 
     const git = simpleGit(process.cwd());
     const reviewerScores = new Map<string, number>();
-    // Best per-file ownership, not pooled across the diff: a pooled ratio is
+    // Per-file ownership, not pooled across the diff: a pooled ratio is
     // dominated by whichever file has the most commits and sits near zero for
     // everyone on a team of any size, which discriminates nothing.
     let bestOwnership = 0;
     let bestOwnedFile: string | undefined;
     let filesWithHistory = 0;
+    const ownerships: number[] = [];
 
     for (const file of files) {
       let emails: string[];
@@ -93,6 +111,7 @@ export const familiarityProvider: RiskProvider = {
       }
 
       const ownership = (counts.get(author) ?? 0) / emails.length;
+      ownerships.push(ownership);
       if (ownership > bestOwnership) {
         bestOwnership = ownership;
         bestOwnedFile = file;
@@ -120,19 +139,25 @@ export const familiarityProvider: RiskProvider = {
       .slice(0, MAX_REVIEWERS)
       .map(([email]) => email);
 
+    const medianOwnership = median(ownerships);
+
     const findings: Finding[] =
-      bestOwnership < OWNERSHIP_THRESHOLD && topReviewers.length > 0
+      medianOwnership < OWNERSHIP_THRESHOLD && topReviewers.length > 0
         ? [
             {
               providerId: ID,
               kind: 'low-ownership',
               severity: 'low',
               title: `Request review from ${topReviewers.join(', ')}`,
-              evidence: `${author} authored at most ${(
+              evidence: `${author} authored a median of ${(
+                medianOwnership * 100
+              ).toFixed(
+                0
+              )}% of the last 12 months of commits across the changed files (highest on any single file: ${(
                 bestOwnership * 100
               ).toFixed(
                 0
-              )}% of the last 12 months of commits on any changed file. The listed reviewers have the most history here.`,
+              )}%). The listed reviewers have the most history here.`,
             },
           ]
         : [];
@@ -143,11 +168,19 @@ export const familiarityProvider: RiskProvider = {
       id: ID,
       label: LABEL,
       status: 'ok',
-      summary: `${author} owns up to ${(bestOwnership * 100).toFixed(
+      summary: `${author} owns a median of ${(medianOwnership * 100).toFixed(
         0
-      )}% of recent commits on the changed files${ownedNote}`,
+      )}% of recent commits across the changed files, up to ${(
+        bestOwnership * 100
+      ).toFixed(0)}%${ownedNote}`,
       findings,
-      details: { bestOwnership, bestOwnedFile, topReviewers, filesWithHistory },
+      details: {
+        bestOwnership,
+        bestOwnedFile,
+        medianOwnership,
+        topReviewers,
+        filesWithHistory,
+      },
     };
   },
 };
